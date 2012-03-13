@@ -1,0 +1,54 @@
+#!/bin/bash
+#Master has port 5433
+#Slave has port 5434
+PSQL_FOLDER=$HOME/bin/postgres
+PSQL_BIN=$PSQL_FOLDER/bin #Binary folder
+PSQL_CONFIG=$PSQL_FOLDER/config #Folder containing all the configuration files
+PSQL_MASTER=$PSQL_FOLDER/master #Master data folder
+PSQL_SLAVE=$PSQL_FOLDER/slave #Slave data folder
+PSQL_ARCHIVE=$PSQL_FOLDER/archive #Archive folder
+ 
+#clean up, take down violently all the processes
+killall postgres
+rm -rf $PSQL_MASTER $PSQL_SLAVE $PSQL_ARCHIVE
+mkdir $PSQL_MASTER $PSQL_SLAVE $PSQL_ARCHIVE
+sleep 1
+ 
+#Initialize master
+$PSQL_BIN/initdb -D $PSQL_MASTER
+cp $PSQL_CONFIG/postgresql.conf.master $PSQL_MASTER/postgresql.conf
+cp $PSQL_CONFIG/pg_hba.conf.master $PSQL_MASTER/pg_hba.conf
+#Start master
+$PSQL_BIN/postgres -D $PSQL_MASTER &
+ 
+#Wait a little before server start up, let it finish initialization
+echo "Master started"
+sleep 2
+ 
+#Initialize slave
+#This is used to start the backup so as slave does not have to recover from
+#scratch when being build. It definitely accelerates standby start up
+$PSQL_BIN/psql postgres -c "select pg_start_backup('backup')"
+cp -pr $PSQL_MASTER/* $PSQL_SLAVE/
+$PSQL_BIN/psql postgres -c "select pg_stop_backup()"
+sleep 1
+echo "Backup performed"
+ 
+#Setup synchronous commit mode on master
+echo "synchronous_standby_names='slave1'" >> $PSQL_MASTER/postgresql.conf
+$PSQL_BIN/pg_ctl reload -D $PSQL_MASTER
+echo "Force master to synchronize mode"
+sleep 1
+ 
+#Then finish by copying all the configuration files for slave
+cp -r $PSQL_MASTER/* $PSQL_SLAVE
+cp $PSQL_CONFIG/postgresql.conf.slave $PSQL_SLAVE/postgresql.conf
+cp $PSQL_CONFIG/recovery.conf.slave $PSQL_SLAVE/recovery.conf
+rm $PSQL_SLAVE/postmaster.pid
+rm -r $PSQL_SLAVE/pg_xlog/*
+ 
+#Start Slave
+chmod 700 $PSQL_SLAVE
+$PSQL_BIN/postgres -D $PSQL_SLAVE &
+echo "Slave started"
+exit 0

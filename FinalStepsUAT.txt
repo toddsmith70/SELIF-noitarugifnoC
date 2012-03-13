@@ -1,0 +1,66 @@
+* install slave with empty 9.0 postgresql. 
+Some hints are at http://packetcloud.net/2010/12/09/how-to-upgrade-from-postgresql-8-4-5-centos-5-base-to-postgresql-9-pgdg-rpm/ 
+
+-- just stop at initdb (no need to run pg_upgrade ), erase 8.4 rpms on slave if installed
+ 
+* stop master pgsql (service postgresql-9.0 stop) 
+
+* modify /var/lib/pgsql/9.0/data/pg_hba.conf on master to have (adjust with your IP info)
+ host replication postgres 10.24.16.0/24 trust 
+
+* mkdir /var/lib/pgsql/9.0/data/pg_wal ; chown postgres /var/lib/pgsql/9.0/data/pg_wal
+ 
+* modify /var/lib/pgsql/9.0/data/postgresql.conf to have
+ wal_level = hot_standby
+ max_wal_senders = 5
+ wal_keep_segments = 32
+ archive_mode = on
+ archive_command = 'cp %p /var/lib/pgsql/9.0/data/pg_wal/%f'
+ 
+* service postgresql-9.0 start on master 
+
+* Copy master data to standby with a point in time backup:
+ su - postgres
+ psql -c "SELECT pg_start_backup('label', true)"
+ rsync -a -v -e ssh /var/lib/pgsql/9.0/data/ slave:/var/lib/pgsql/9.0/data/ --exclude postmaster.pid
+ psql -c "SELECT pg_stop_backup()"
+ 
+* copy the postgresql.conf settings above to slave so it can act as a primary after failover
+ * enable read only queries on slave in postgresql.conf
+ hot_standby = on
+ 
+* create a recovery file in slave with streaming replication in /var/lib/pgsql/9.0/data/recovery.conf, adjust IP as needed
+ standby_mode = 'on'
+ primary_conninfo = 'host=10.24.16.11 port=5432 user=postgres'
+ trigger_file = '/tmp/pgsql.trigger'
+ restore_command = 'cp /var/lib/pgsql/9.0/data/pg_wal/%f "%p"'
+ 
+* service postgresql-9.0 start on slave 
+
+* calculate replication lag:
+ SELECT pg_current_xlog_location() --- on master
+ SELECT pg_last_xlog_receive_location() --- on slave
+ SELECT pg_last_xlog_replay_location() --- on slave
+ 
+* check replication using ps command
+ ps -ef | grep sender (on master) :
+ postgres 6879 6831 0 10:31 ? 00:00:00 postgres: wal sender process postgres 127.0.0.1(44663) streaming 0/2000000
+ 
+ps -ef | grep receiver ( on slave ):
+ postgres 6878 6872 1 10:31 ? 00:00:01 postgres: wal receiver process streaming 0/2000000
+ 
+How to failover::q
+
+ * touch /tmp/pgsql.trigger ... start querying to failover server
+ 
+How to restart replication after failover :
+ * remake a fresh backup. master doesn't have to be stopped 
+
+How to restart replication after standby fails:
+ * restart postgres in standby after eliminating cause of failure
+ 
+How to disconnect standby from primary:
+ * touch /tmp/pgsql.trigger in slave while primary running. 
+
+How to re-sync standby after isolation:
+ * shutdown standby, make a fresh backup as per above
